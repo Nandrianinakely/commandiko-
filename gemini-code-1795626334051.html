@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CarControl PFE - Contrôle Véhicule</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #121212;
+      color: #ffffff;
+      text-align: center;
+      margin: 0;
+      padding: 20px;
+    }
+    h2 { color: #4CAF50; }
+    .card {
+      background: #1e1e1e;
+      border-radius: 10px;
+      padding: 20px;
+      margin: 15px auto;
+      max-width: 400px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    }
+    button {
+      width: 100%;
+      padding: 15px;
+      margin: 10px 0;
+      font-size: 18px;
+      font-weight: bold;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      color: white;
+    }
+    .btn-connect { background-color: #2196F3; }
+    .btn-start { background-color: #4CAF50; }
+    .btn-stop { background-color: #f44336; }
+    .btn-lock { background-color: #FF9800; }
+    .btn-unlock { background-color: #00BCD4; }
+    .btn-reset { background-color: #9C27B0; }
+    button:active { opacity: 0.8; }
+    #status { font-weight: bold; color: #ff9800; }
+    #log {
+      background: #000;
+      color: #00ff00;
+      text-align: left;
+      padding: 10px;
+      height: 150px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 14px;
+      border-radius: 5px;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>CarControl - PFE ESP32</h2>
+
+  <div class="card">
+    <p>Statut : <span id="status">Déconnecté</span></p>
+    <button class="btn-connect" onclick="connectBLE()">Connexion Bluetooth</button>
+  </div>
+
+  <div class="card">
+    <h3>Commandes Véhicule</h3>
+    <button class="btn-start" onclick="envoyerCommande('START')">DÉMARRER</button>
+    <button class="btn-stop" onclick="envoyerCommande('STOP')">ARRÊTER</button>
+    <button class="btn-lock" onclick="envoyerCommande('LOCK')">VERROUILLER</button>
+    <button class="btn-unlock" onclick="envoyerCommande('UNLOCK')">DÉVERROUILLER</button>
+    <button class="btn-reset" onclick="reinitialiserSync()">🔄 Réinitialiser Sync (0)</button>
+  </div>
+
+  <div class="card">
+    <h3>Journal des actions & Alertes</h3>
+    <div id="log">En attente de connexion...</div>
+  </div>
+
+  <script>
+    const SERVICE_UUID       = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const CHAR_COMMANDE_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+    const CHAR_REPONSE_UUID  = "0d563a58-196a-48ce-ace2-dfec78acc7a2";
+    const CLE_SECRETE        = "MaCleSecretePFE2026";
+
+    let bluetoothServer = null;
+    let commandeCharacteristic = null;
+    let compteurLocal = 0;
+
+    function log(message) {
+      const logDiv = document.getElementById("log");
+      logDiv.innerHTML += message + "<br>";
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    async function connectBLE() {
+      try {
+        log("Recherche de l'ESP32...");
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ name: "CarControl_ESP32_PFE" }],
+          optionalServices: [SERVICE_UUID]
+        });
+
+        bluetoothServer = await device.gatt.connect();
+        const service = await bluetoothServer.getPrimaryService(SERVICE_UUID);
+        commandeCharacteristic = await service.getCharacteristic(CHAR_COMMANDE_UUID);
+        const repCharacteristic = await service.getCharacteristic(CHAR_REPONSE_UUID);
+
+        await repCharacteristic.startNotifications();
+        repCharacteristic.addEventListener('characteristicvaluechanged', (event) => {
+          const decoder = new TextDecoder('utf-8');
+          const valeurRecue = decoder.decode(event.target.value);
+          log("📥 Notification : " + valeurRecue);
+
+          const parties = valeurRecue.split('|');
+          if (parties[0] === "ALERTE") {
+            alert("🚨 ALERTE DE SÉCURITÉ :\n" + parties[1]);
+          } else if (parties[0] === "REFUS") {
+            alert("⚠️ COMMANDE REFUSÉE :\n" + parties[1]);
+          } else if (parties[0] === "OK") {
+            log("✅ " + parties[1]);
+          }
+        });
+
+        document.getElementById("status").innerText = "Connecté ✅";
+        document.getElementById("status").style.color = "#4CAF50";
+        log("Connexion Bluetooth établie !");
+
+      } catch (error) {
+        log("❌ Erreur de connexion : " + error);
+      }
+    }
+
+    function calculerHMAC(compteur) {
+      const hash = CryptoJS.HmacSHA256(compteur.toString(), CLE_SECRETE);
+      const hashHex = CryptoJS.enc.Hex.stringify(hash);
+      return hashHex.substring(0, 8);
+    }
+
+    // Fonction de réinitialisation complète (met l'APK à 0 et prévient l'ESP32)
+    async function reinitialiserSync() {
+      compteurLocal = 0;
+      if (commandeCharacteristic) {
+        try {
+          let hmacCode = calculerHMAC(compteurLocal);
+          let trame = "RESET_SYNC:" + hmacCode;
+          const encoder = new TextEncoder();
+          await commandeCharacteristic.writeValue(encoder.encode(trame));
+          log("🔄 Commande RESET_SYNC envoyée à l'ESP32 !");
+        } catch (e) {
+          log("❌ Erreur envoi reset : " + e);
+        }
+      } else {
+        alert("Compteur local remis à 0 (Connectez le Bluetooth pour sync l'ESP32).");
+      }
+    }
+
+    async function envoyerCommande(nomCommande) {
+      if (!commandeCharacteristic) {
+        alert("Veuillez d'abord connecter le téléphone en Bluetooth !");
+        return;
+      }
+
+      let hmacCode = calculerHMAC(compteurLocal);
+      let trame = nomCommande + ":" + hmacCode;
+
+      try {
+        const encoder = new TextEncoder();
+        await commandeCharacteristic.writeValue(encoder.encode(trame));
+        log("📤 Envoi : " + trame);
+        compteurLocal += 2; 
+      } catch (error) {
+        log("❌ Erreur d'envoi : " + error);
+      }
+    }
+  </script>
+</body>
+</html>
